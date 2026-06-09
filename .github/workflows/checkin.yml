@@ -44,6 +44,19 @@ jobs:
           pip install -r requirements.txt
           python -c "from cloakbrowser import ensure_binary; ensure_binary()"
 
+      # 从私有仓库下载签到脚本
+      - name: 从私有仓库下载签到脚本
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          mkdir -p private_repo
+          curl -L -H "Authorization: token $GH_TOKEN" \
+            "https://raw.githubusercontent.com/gunqio/zhiyong/main/nat_sign_pydoll.py" \
+            -o "private_repo/nat_sign_pydoll.py"
+          
+          echo "==== 脚本下载验证 ===="
+          head -20 private_repo/nat_sign_pydoll.py
+
       - name: 下载并启动 Xray 代理
         env:
           V2RAY_CONFIG: ${{ secrets.V2RAY_CONFIG }}
@@ -64,21 +77,16 @@ jobs:
         env:
           USER_EMAIL: ${{ secrets.USER_EMAIL }}
           USER_PASSWORD: ${{ secrets.USER_PASSWORD }}
-          APP_TOKEN: ${{ secrets.APP_TOKEN }}
-          WX_PUSHER_UID: ${{ secrets.WX_PUSHER_UID }}
           DISPLAY: ":99"
           LIBGL_ALWAYS_SOFTWARE: "1"
           GALLIUM_DRIVER: "llvmpipe"
-          # schedule 触发时 enable_recording 为空字符串，默认 false
           ENABLE_RECORDING: ${{ github.event.inputs.enable_recording || 'false' }}
         run: |
-          # 启动 Xvfb 虚拟显示器
           Xvfb :99 -screen 0 1280x720x24 +extension RANDR &
           XVFB_PID=$!
           sleep 2
           DISPLAY=:99 xdpyinfo > /dev/null 2>&1 && echo "Xvfb 就绪" || echo "Xvfb 启动异常"
 
-          # 根据开关决定是否录屏
           RECORD_PID=""
           if [ "$ENABLE_RECORDING" = "true" ]; then
             echo "🎬 录屏已开启"
@@ -92,13 +100,12 @@ jobs:
             echo "⏭️ 录屏已跳过（定时任务默认不录屏）"
           fi
 
-          # 运行签到脚本
-          timeout 270 python nat_sign_pydoll.py || echo "脚本退出码: $?"
+          # 运行私库脚本
+          timeout 270 python private_repo/nat_sign_pydoll.py || echo "脚本退出码: $?"
 
           echo "=== 截图目录内容 ==="
           ls -la ./screenshots/ || echo "截图目录不存在"
 
-          # 停止录屏（如果有）
           if [ -n "$RECORD_PID" ]; then
             sleep 2
             kill $RECORD_PID 2>/dev/null || true
@@ -121,6 +128,27 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
+      # Telegram 结果推送（全局执行完毕必触发）
+      - name: Telegram 通知
+        if: always()
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: |
+          STATUS="✅ 执行成功"
+          if [[ "${{ job.status }}" != "success" ]]; then
+            STATUS="❌ 执行失败"
+          fi
+          TEXT="NAT签到任务 ${STATUS}
+运行分支: ${{ github.ref_name }}
+触发方式: ${{ github.event_name }}
+运行编号: #${{ github.run_number }}
+详情链接: ${{ github.run_url }}"
+          
+          curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${TG_CHAT_ID}" \
+            -d "text=${TEXT}"
+
       - name: 清理旧的 workflow runs（只保留最近 2 个）
         if: always()
         env:
@@ -130,7 +158,6 @@ jobs:
           WORKFLOW_ID="${{ github.workflow }}"
 
           echo "获取所有 runs..."
-          # 获取当前 workflow 的所有 run id，按创建时间降序
           RUN_IDS=$(gh run list \
             --repo "$REPO" \
             --workflow "$WORKFLOW_ID" \
@@ -138,7 +165,6 @@ jobs:
             --json databaseId \
             --jq '.[].databaseId')
 
-          # 跳过前2个，删除其余的
           SKIP=2
           COUNT=0
           for RUN_ID in $RUN_IDS; do
